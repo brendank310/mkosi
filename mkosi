@@ -61,6 +61,7 @@ class OutputFormat(Enum):
     subvolume = 5
     tar = 6
     raw_xfs = 7
+    blkdev = 8
 
 RAW_RW_FS_FORMATS = (
     OutputFormat.raw_ext4,
@@ -68,7 +69,7 @@ RAW_RW_FS_FORMATS = (
     OutputFormat.raw_xfs
 )
 
-RAW_FORMATS = (*RAW_RW_FS_FORMATS, OutputFormat.raw_squashfs)
+RAW_FORMATS = (*RAW_RW_FS_FORMATS, OutputFormat.raw_squashfs, OutputFormat.blkdev)
 
 class Distribution(Enum):
     fedora = 1
@@ -416,7 +417,10 @@ def create_image(args, workspace, for_cache):
         table, run_sfdisk = determine_partition_table(args)
 
         if run_sfdisk:
-            run(["sfdisk", "--color=never", f.name], input=table.encode("utf-8"), check=True)
+            if args.blkdev:
+                run(["sfdisk", "--color=never", args.blkdev], input=table.encode("utf-8"), check=True)
+            else:
+                run(["sfdisk", "--color=never", f.name], input=table.encode("utf-8"), check=True)
             run(["sync"])
 
         args.ran_sfdisk = run_sfdisk
@@ -424,7 +428,7 @@ def create_image(args, workspace, for_cache):
     return f
 
 def reuse_cache_image(args, workspace, run_build_script, for_cache):
-
+    
     if not args.incremental:
         return None, False
     if args.output_format not in RAW_RW_FS_FORMATS:
@@ -471,7 +475,7 @@ def reuse_cache_image(args, workspace, run_build_script, for_cache):
     return f, True
 
 @contextlib.contextmanager
-def attach_image_loopback(args, raw):
+def attach_image_loopdev(args, raw):
     if raw is None:
         yield None
         return
@@ -483,17 +487,43 @@ def attach_image_loopback(args, raw):
         loopdev = c.stdout.decode("utf-8").strip()
         output.append(loopdev)
 
-    try:
-        yield loopdev
-    finally:
-        with complete_step('Detaching image file'):
-            run(["losetup", "--detach", loopdev], check=True)
+        try:
+            yield loopdev
+        finally:
+            with complete_step('Detaching image file'):
+                run(["losetup", "--detach", loopdev], check=True)
 
-def partition(loopdev, partno):
+def attach_image_blkdev(args, raw):
+    if raw is None:
+        return None
+
+    if args.blkdev is None:
+        return None
+    
+    with complete_step('Attach image device',
+                       'Attached image file as {}') as output:
+        loopdev = args.blkdev
+        output.append(loopdev)
+        print(loopdev)
+        return loopdev
+
+@contextlib.contextmanager
+def attach_image(args, raw):
+    if args.output_format == OutputFormat.blkdev:
+        loopdev = attach_image_blkdev(args, raw)
+        yield loopdev
+    else:
+        with attach_image_loopdev(args, raw) as loopdev:
+            yield loopdev
+            
+def partition(args, loopdev, partno):
     if partno is None:
         return None
 
-    return loopdev + "p" + str(partno)
+    if args.blkdev:
+        return loopdev + str(partno)
+    else:
+        return loopdev + "p" + str(partno)
 
 def prepare_swap(args, loopdev, cached):
     if loopdev is None:
@@ -504,7 +534,7 @@ def prepare_swap(args, loopdev, cached):
         return
 
     with complete_step('Formatting swap partition'):
-        run(["mkswap", "-Lswap", partition(loopdev, args.swap_partno)], check=True)
+        run(["mkswap", "-Lswap", partition(args, loopdev, args.swap_partno)], check=True)
 
 def prepare_esp(args, loopdev, cached):
     if loopdev is None:
@@ -515,7 +545,7 @@ def prepare_esp(args, loopdev, cached):
         return
 
     with complete_step('Formatting ESP partition'):
-        run(["mkfs.fat", "-nEFI", "-F32", partition(loopdev, args.esp_partno)], check=True)
+        run(["mkfs.fat", "-nEFI", "-F32", partition(args, loopdev, args.esp_partno)], check=True)
 
 def mkfs_ext4(label, mount, dev):
     run(["mkfs.ext4", "-L", label, "-M", mount, dev], check=True)
@@ -569,7 +599,7 @@ def luks_format_root(args, loopdev, run_build_script, cached, inserting_squashfs
         return
 
     with complete_step("LUKS formatting root partition"):
-        luks_format(partition(loopdev, args.root_partno), args.passphrase)
+        luks_format(partition(args, loopdev, args.root_partno), args.passphrase)
 
 def luks_format_home(args, loopdev, run_build_script, cached):
 
@@ -583,7 +613,7 @@ def luks_format_home(args, loopdev, run_build_script, cached):
         return
 
     with complete_step("LUKS formatting home partition"):
-        luks_format(partition(loopdev, args.home_partno), args.passphrase)
+        luks_format(partition(args, loopdev, args.home_partno), args.passphrase)
 
 def luks_format_srv(args, loopdev, run_build_script, cached):
 
@@ -597,7 +627,7 @@ def luks_format_srv(args, loopdev, run_build_script, cached):
         return
 
     with complete_step("LUKS formatting server data partition"):
-        luks_format(partition(loopdev, args.srv_partno), args.passphrase)
+        luks_format(partition(args, loopdev, args.srv_partno), args.passphrase)
 
 def luks_setup_root(args, loopdev, run_build_script, inserting_squashfs=False):
 
@@ -611,7 +641,7 @@ def luks_setup_root(args, loopdev, run_build_script, inserting_squashfs=False):
         return None
 
     with complete_step("Opening LUKS root partition"):
-        return luks_open(partition(loopdev, args.root_partno), args.passphrase)
+        return luks_open(partition(args ,loopdev, args.root_partno), args.passphrase)
 
 def luks_setup_home(args, loopdev, run_build_script):
 
@@ -623,7 +653,7 @@ def luks_setup_home(args, loopdev, run_build_script):
         return None
 
     with complete_step("Opening LUKS home partition"):
-        return luks_open(partition(loopdev, args.home_partno), args.passphrase)
+        return luks_open(partition(args, loopdev, args.home_partno), args.passphrase)
 
 def luks_setup_srv(args, loopdev, run_build_script):
 
@@ -635,7 +665,7 @@ def luks_setup_srv(args, loopdev, run_build_script):
         return None
 
     with complete_step("Opening LUKS server data partition"):
-        return luks_open(partition(loopdev, args.srv_partno), args.passphrase)
+        return luks_open(partition(args, loopdev, args.srv_partno), args.passphrase)
 
 @contextlib.contextmanager
 def luks_setup_all(args, loopdev, run_build_script):
@@ -651,9 +681,11 @@ def luks_setup_all(args, loopdev, run_build_script):
             try:
                 srv = luks_setup_srv(args, loopdev, run_build_script)
 
-                yield (partition(loopdev, args.root_partno) if root is None else root,
-                       partition(loopdev, args.home_partno) if home is None else home,
-                       partition(loopdev, args.srv_partno) if srv is None else srv)
+                print(root)
+                
+                yield (partition(args, loopdev, args.root_partno) if root is None else root,
+                       partition(args, loopdev, args.home_partno) if home is None else home,
+                       partition(args, loopdev, args.srv_partno) if srv is None else srv)
             finally:
                 luks_close(srv, "Closing LUKS server data partition")
         finally:
@@ -736,7 +768,7 @@ def mount_image(args, workspace, loopdev, root_dev, home_dev, srv_dev, root_read
             mount_loop(args, srv_dev, os.path.join(root, "srv"))
 
         if args.esp_partno is not None:
-            mount_loop(args, partition(loopdev, args.esp_partno), os.path.join(root, "efi"))
+            mount_loop(args, partition(args, loopdev, args.esp_partno), os.path.join(root, "efi"))
 
         # Make sure /tmp and /run are not part of the image
         mount_tmpfs(os.path.join(root, "run"))
@@ -1076,16 +1108,22 @@ ensure that you have openssl program in your system.
 def install_fedora(args, workspace, run_build_script):
     if args.release == 'rawhide':
         last = sorted(FEDORA_KEYS_MAP)[-1]
-        die('Use numerical release for Fedora, not "rawhide"\n' +
-            '(rawhide was {} when this mkosi version was released)'.format(last))
+        warn('Assuming rawhide is version {} -- '.format(last) +
+             'You may specify otherwise with --release=rawhide-<version>')
+        args.releasever = last
+    elif args.release.startswith('rawhide-'):
+        args.release, args.releasever = args.release.split('-')
+        sys.stderr.write('Fedora rawhide - release version: %s\n' % args.releasever)
+    else:
+        args.releasever = args.release
 
     masked = disable_kernel_install(args, workspace)
 
-    gpg_key = "/etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-%s-x86_64" % args.release
+    gpg_key = "/etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-%s-x86_64" % args.releasever
     if os.path.exists(gpg_key):
         gpg_key = "file://%s" % gpg_key
     else:
-        gpg_key = "https://getfedora.org/static/%s.txt" % FEDORA_KEYS_MAP[args.release]
+        gpg_key = "https://getfedora.org/static/%s.txt" % FEDORA_KEYS_MAP[args.releasever]
 
     if args.mirror:
         baseurl = "{args.mirror}/releases/{args.release}/Everything/x86_64/os/".format(args=args)
@@ -1705,8 +1743,8 @@ def install_boot_loader_clear(args, workspace, loopdev):
         # figure out uuid and related parameters.
         "--bind-ro=/dev",
         "--property=DeviceAllow=" + loopdev,
-        "--property=DeviceAllow=" + partition(loopdev, args.esp_partno),
-        "--property=DeviceAllow=" + partition(loopdev, args.root_partno),
+        "--property=DeviceAllow=" + partition(args, loopdev, args.esp_partno),
+        "--property=DeviceAllow=" + partition(args, loopdev, args.root_partno),
 
         # clr-boot-manager compiled in Clear Linux will assume EFI
         # partition is mounted in "/boot".
@@ -1975,7 +2013,7 @@ def insert_partition(args, workspace, raw, loopdev, partno, blob, name, type_uui
         dev = None
 
     try:
-        run(["dd", "if=" + blob.name, "of=" + (dev if dev is not None else partition(loopdev, partno))], check=True)
+        run(["dd", "if=" + blob.name, "of=" + (dev if dev is not None else partition(args, loopdev, partno))], check=True)
     finally:
         luks_close(dev, "Closing LUKS root partition")
 
@@ -2391,6 +2429,7 @@ def parse_args():
     group.add_argument("--encrypt", choices=("all", "data"), help='Encrypt everything except: ESP ("all") or ESP and root ("data")')
     group.add_argument("--verity", action='store_true', help='Add integrity partition (implies --read-only)')
     group.add_argument("--compress", action='store_true', help='Enable compression in file system (only raw_btrfs, subvolume)')
+    group.add_argument("--device", dest='blkdev', help='Path to block device to target build.')
     group.add_argument("--xz", action='store_true', help='Compress resulting image with xz (only raw_ext4, raw_btrfs, raw_squashfs, raw_xfs, implied on tar)')
     group.add_argument('-i', "--incremental", action='store_true', help='Make use of and generate intermediary cache images')
 
@@ -3359,6 +3398,7 @@ def build_image(args, workspace, run_build_script, for_cache=False):
     make_build_dir(args)
 
     raw, cached = reuse_cache_image(args, workspace.name, run_build_script, for_cache)
+    
     if for_cache and cached:
         # Found existing cache image, exiting build_image
         return None, None, None
@@ -3366,8 +3406,7 @@ def build_image(args, workspace, run_build_script, for_cache=False):
     if not cached:
         raw = create_image(args, workspace.name, for_cache)
 
-    with attach_image_loopback(args, raw) as loopdev:
-
+    with attach_image(args, raw) as loopdev:
         prepare_swap(args, loopdev, cached)
         prepare_esp(args, loopdev, cached)
 
