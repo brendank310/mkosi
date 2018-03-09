@@ -1654,13 +1654,29 @@ def run_postinst_script(args, workspace, run_build_script, for_cache):
         # mounting it into the tree, but for that we'd need a good
         # place to mount it to. But if we create that we might as well
         # just copy the file anyway.
-
         shutil.copy2(args.postinst_script,
                      os.path.join(workspace, "root", "root/postinst"))
 
         run_workspace_command(args, workspace, "/root/postinst", "build" if run_build_script else "final", network=args.with_network)
+
+        # Copy into the tree now, but don't run it until after after the secureboot steps...
+        # Careful here, changing the rootfs hash within the finalizescript might cause you
+        # BadProblems (TM).
+        if args.finalize_script is not None:
+            shutil.copy2(args.finalize_script,
+                         os.path.join(workspace, "root", "root/finalizescript"))
+        
         os.unlink(os.path.join(workspace, "root", "root/postinst"))
 
+def run_finalize_script(args, workspace, run_build_script, for_cache):
+
+    if for_cache:
+        return
+
+    with complete_step('Running finalize script'):
+        if args.finalize_script is not None:
+            run_workspace_command(args, workspace, "/root/finalizescript", "build" if run_build_script else "final", network=args.with_network)
+        
 def find_kernel_file(workspace_root, pattern):
     # Look for the vmlinuz file in the workspace
     workspace_pattern = os.path.join(workspace_root, pattern.lstrip('/'))
@@ -2082,7 +2098,6 @@ def install_unified_kernel(args, workspace, run_build_script, for_cache, root_ha
             dracut = ["/usr/bin/dracut",
                       "-v",
                       "--no-hostonly",
-                      "--uefi",
                       "--kver", kver.name,
                       "--kernel-cmdline", cmdline]
 
@@ -2401,6 +2416,7 @@ def parse_args():
     group.add_argument("--build-sources", help='Path for sources to build', metavar='PATH')
     group.add_argument("--build-dir", help='Path to use as persistent build directory', metavar='PATH')
     group.add_argument("--build-package", action=CommaDelimitedListAction, dest='build_packages', default=[], help='Additional packages needed for build script', metavar='PACKAGE')
+    group.add_argument("--finalize-script", help='Finalize script to run inside image', metavar='PATH')
     group.add_argument("--postinst-script", help='Postinstall script to run inside image', metavar='PATH')
     group.add_argument('--use-git-files', type=parse_boolean,
                        help='Ignore any files that git itself ignores (default: guess)')
@@ -2704,6 +2720,9 @@ def process_setting(args, section, key, value):
         elif key == "BuildPackages":
             list_value = value if type(value) == list else value.split()
             args.build_packages.extend(list_value)
+        elif key in {"FinalizeScript"}:
+            if args.finalize_script is None:
+                args.finalize_script = value
         elif key in {"PostinstallScript", "PostInstallationScript"}:
             if args.postinst_script is None:
                 args.postinst_script = value
@@ -2874,6 +2893,13 @@ def find_postinst_script(args):
     if os.path.exists("mkosi.postinst"):
         args.postinst_script = "mkosi.postinst"
 
+def find_finalize_script(args):
+    if args.finalize_script is not None:
+        return
+
+    if os.path.exists("mkosi.finalize"):
+        args.finalize_script = "mkosi.finalize"
+        
 def find_output_dir(args):
     if args.output_dir is not None:
         return
@@ -2968,6 +2994,7 @@ def load_args():
     find_build_script(args)
     find_build_sources(args)
     find_build_dir(args)
+    find_finalize_script(args)
     find_postinst_script(args)
     find_output_dir(args)
     find_password(args)
@@ -3119,6 +3146,9 @@ def load_args():
     if args.build_dir is not None:
         args.build_dir = os.path.abspath(args.build_dir)
 
+    if args.finalize_script is not None:
+        args.finalize_script = os.path.abspath(args.finalize_script)
+        
     if args.postinst_script is not None:
         args.postinst_script = os.path.abspath(args.postinst_script)
 
@@ -3408,6 +3438,7 @@ def build_image(args, workspace, run_build_script, for_cache=False):
             with mount_image(args, workspace.name, loopdev, encrypted_root, encrypted_home, encrypted_srv, root_read_only=True):
                 install_unified_kernel(args, workspace.name, run_build_script, for_cache, root_hash)
                 secure_boot_sign(args, workspace.name, run_build_script, for_cache)
+                run_finalize_script(args, workspace.name, run_build_script, for_cache)
 
     tar = make_tar(args, workspace.name, run_build_script, for_cache)
 
