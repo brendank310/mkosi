@@ -1734,11 +1734,16 @@ def install_boot_loader(args, workspace, loopdev, cached):
         return
 
     with complete_step("Installing boot loader"):
-        shutil.copyfile(os.path.join(workspace, "root", "usr/lib/systemd/boot/efi/systemd-bootx64.efi"),
-                        os.path.join(workspace, "root", "boot/efi/EFI/systemd/systemd-bootx64.efi"))
+        if args.bootloader:
+            shutil.copyfile(os.path.join(workspace, "root", args.bootloader),
+                            os.path.join(workspace, "root", "boot/efi/EFI/BOOT/bootx64.efi"))
+            print(args.bootloader)
+        else:
+            shutil.copyfile(os.path.join(workspace, "root", "usr/lib/systemd/boot/efi/systemd-bootx64.efi"),
+                            os.path.join(workspace, "root", "boot/efi/EFI/systemd/systemd-bootx64.efi"))
 
-        shutil.copyfile(os.path.join(workspace, "root", "usr/lib/systemd/boot/efi/systemd-bootx64.efi"),
-                        os.path.join(workspace, "root", "boot/efi/EFI/BOOT/bootx64.efi"))
+            shutil.copyfile(os.path.join(workspace, "root", "usr/lib/systemd/boot/efi/systemd-bootx64.efi"),
+                            os.path.join(workspace, "root", "boot/efi/EFI/BOOT/bootx64.efi"))
 
         if args.distribution == Distribution.arch:
             install_boot_loader_arch(args, workspace)
@@ -2402,6 +2407,7 @@ def parse_args():
     group.add_argument("--encrypt", choices=("all", "data"), help='Encrypt everything except: ESP ("all") or ESP and root ("data")')
     group.add_argument("--verity", action='store_true', help='Add integrity partition (implies --read-only)')
     group.add_argument("--compress", action='store_true', help='Enable compression in file system (only raw_btrfs, subvolume)')
+    group.add_argument("--bootloader", dest='bootloader', help='Path to custom bootloader EFI image.')
     group.add_argument("--xz", action='store_true', help='Compress resulting image with xz (only raw_ext4, raw_btrfs, raw_squashfs, raw_xfs, implied on tar)')
     group.add_argument('-i', "--incremental", action='store_true', help='Make use of and generate intermediary cache images')
 
